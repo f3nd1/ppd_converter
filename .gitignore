@@ -1,0 +1,24 @@
+# Secrets — never commit
+.env
+.env.local
+*.local
+
+# Build output
+dist
+node_modules
+
+# SQLite database and its journals
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# PM2 logs (project-local, see ecosystem.config.cjs)
+logs
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+.claude/
