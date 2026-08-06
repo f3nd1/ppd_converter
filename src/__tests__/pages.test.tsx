@@ -37,7 +37,15 @@ const criteria = Array.from({ length: 7 }, (_, i) => ({
       : [],
 }))
 
+const AUTHORISED = {
+  email: 'felix@unitedceres.edu.sg',
+  authorised: true,
+  capabilities: { google: true, openai: true, session: true },
+  allowedAccount: 'felix@unitedceres.edu.sg',
+}
+
 const responses: Record<string, unknown> = {
+  '/auth/me': AUTHORISED,
   '/dashboard': {
     totals: { sourceDocuments: 2, criteria: 7, subCriteria: 1 },
     status: { notStarted: 2, queued: 0, processing: 0, migrated: 0, awaitingReview: 0, approved: 0, failed: 0 },
@@ -107,10 +115,16 @@ const renderAt = (route: string) =>
     </MemoryRouter>,
   )
 
+/** Renders and waits for the auth check to finish, so pages are mounted. */
+async function renderSignedIn(route: string) {
+  renderAt(route)
+  await waitFor(() => expect(screen.queryByText('Checking your sign-in…')).toBeNull())
+}
+
 describe('navigation', () => {
-  it('has exactly five primary navigation areas', () => {
+  it('has exactly five primary navigation areas', async () => {
     expect(NAV).toHaveLength(5)
-    renderAt('/')
+    await renderSignedIn('/')
     const nav = screen.getByRole('navigation')
     expect(within(nav).getAllByRole('link')).toHaveLength(5)
   })
@@ -300,19 +314,94 @@ describe('Reports and Activity', () => {
 })
 
 describe('error states', () => {
-  it('shows an error with its correlation id when the API fails', async () => {
+  it('shows an error with its correlation id when a page request fails', async () => {
+    // The auth check succeeds, so we are past the sign-in gate and looking at a
+    // genuine page failure — which is where a correlation id has to appear.
     vi.stubGlobal(
       'fetch',
-      vi.fn(
-        async () =>
-          new Response(JSON.stringify({ error: 'Database unavailable', correlationId: 'abc-123' }), {
-            status: 500,
-          }),
-      ),
+      vi.fn(async (input: string) => {
+        if (String(input).endsWith('/auth/me')) {
+          return new Response(JSON.stringify(AUTHORISED), { status: 200 })
+        }
+        return new Response(
+          JSON.stringify({ error: 'Database unavailable', correlationId: 'abc-123' }),
+          { status: 500 },
+        )
+      }),
     )
-    renderAt('/')
+    await renderSignedIn('/')
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
     expect(screen.getByText(/Database unavailable/)).toBeTruthy()
     expect(screen.getByText('abc-123')).toBeTruthy()
+  })
+
+  it('shows the sign-in screen, not a page error, when the server is unreachable', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 502 })))
+    renderAt('/')
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: 'Sign in with Google' })).toBeTruthy(),
+    )
+  })
+})
+
+describe('sign-in gate', () => {
+  // The reason this exists: on first deployment the app 401'd on every page,
+  // showed "Something went wrong", and offered no way to sign in at all.
+  const signedOut = (over: Record<string, unknown> = {}) => ({
+    email: null,
+    authorised: false,
+    capabilities: { google: true, openai: true, session: true },
+    allowedAccount: 'felix@unitedceres.edu.sg',
+    ...over,
+  })
+
+  afterEach(() => {
+    responses['/auth/me'] = AUTHORISED
+  })
+
+  it('shows a sign-in screen, not an error, when not signed in', async () => {
+    responses['/auth/me'] = signedOut()
+    renderAt('/')
+    await waitFor(() =>
+      expect(screen.getByRole('link', { name: 'Sign in with Google' })).toBeTruthy(),
+    )
+    expect(screen.queryByText(/Something went wrong/i)).toBeNull()
+  })
+
+  it('points the sign-in link at the OAuth route under the base path', async () => {
+    responses['/auth/me'] = signedOut()
+    renderAt('/')
+    const link = await waitFor(() => screen.getByRole('link', { name: 'Sign in with Google' }))
+    expect(link.getAttribute('href')).toBe('/ppd_converter/api/auth/google/start')
+  })
+
+  it('names the wrong account plainly when someone else signs in', async () => {
+    responses['/auth/me'] = signedOut({ email: 'someone.else@example.com' })
+    renderAt('/')
+    await waitFor(() => expect(screen.getByText('someone.else@example.com')).toBeTruthy())
+    expect(screen.getByText(/not authorised/i)).toBeTruthy()
+  })
+
+  it('says so when Google is not configured on the server', async () => {
+    responses['/auth/me'] = signedOut({
+      capabilities: { google: false, openai: true, session: true },
+    })
+    renderAt('/')
+    await waitFor(() => expect(screen.getByText(/Google sign-in is not configured/i)).toBeTruthy())
+  })
+
+  it('shows the signed-in account and a sign-out button once authorised', async () => {
+    await renderSignedIn('/')
+    expect(screen.getByText('felix@unitedceres.edu.sg')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeTruthy()
+  })
+
+  it('warns in the sidebar when OpenAI is not configured', async () => {
+    responses['/auth/me'] = {
+      ...AUTHORISED,
+      capabilities: { google: true, openai: false, session: true },
+    }
+    await renderSignedIn('/')
+    expect(screen.getByText('OpenAI is not configured')).toBeTruthy()
   })
 })

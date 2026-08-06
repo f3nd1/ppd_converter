@@ -178,3 +178,33 @@ test.describe('PPD Converter workflow', () => {
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Reports and Activity')
   })
 })
+
+test.describe('sign-in', () => {
+  // Signed out: no storageState, so this is a genuine unauthenticated visit.
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  test('an unauthenticated visitor gets a sign-in screen, not an error', async ({ page }) => {
+    await page.goto(`${BASE}/`)
+    await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible()
+    await expect(page.getByText(/Something went wrong/i)).toHaveCount(0)
+    await expect(page.getByRole('link', { name: 'Sign in with Google' })).toHaveAttribute(
+      'href',
+      `${BASE}/api/auth/google/start`,
+    )
+  })
+
+  test('the app itself is not reachable while signed out', async ({ page }) => {
+    await page.goto(`${BASE}/migration`)
+    // The sign-in gate replaces the whole app, so the sidebar never renders.
+    await expect(page.locator('.sidebar')).toHaveCount(0)
+    await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible()
+  })
+})
+
+test.describe('signed-in chrome', () => {
+  test('shows the signed-in account and a sign-out button', async ({ page }) => {
+    await page.goto(`${BASE}/`)
+    await expect(page.locator('.account-email')).toHaveText('felix@unitedceres.edu.sg')
+    await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  })
+})
