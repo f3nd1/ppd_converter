@@ -1,83 +1,109 @@
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import cookieParser from 'cookie-parser'
 import express from 'express'
 import helmet from 'helmet'
+import { applyPragmas } from './lib/db.ts'
+import { capabilities, env } from './lib/env.ts'
+import { correlation, csrfGuard, errorHandler } from './lib/http.ts'
+import { log } from './lib/logger.ts'
+import { attachSession, BASE_PATH, requireAuth } from './lib/session.ts'
+import { authRouter } from './routes/auth.ts'
+import { criteriaRouter } from './routes/criteria.ts'
+import { configRouter } from './routes/config.ts'
+import { migrationRouter } from './routes/migration.ts'
+import { reportsRouter } from './routes/reports.ts'
+import { sourcesRouter } from './routes/sources.ts'
 
-// Must match `base` in vite.config.ts and the nginx location block.
-const BASE_PATH = '/ppd_converter'
-const HOST = process.env.HOST ?? '127.0.0.1'
-const PORT = Number(process.env.PORT ?? 4020)
-
-// Resolved from the bundle's own location (dist/server/index.js) so the server
-// works regardless of the directory PM2 happens to start it from.
 const clientDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../client')
 
-const app = express()
+export function createApp() {
+  const app = express()
 
-// Trust the single nginx hop in front of us so req.protocol and req.ip reflect
-// the real client rather than the proxy. Exactly one hop — not `true`, which
-// would let a spoofed X-Forwarded-For through.
-app.set('trust proxy', 1)
-app.disable('x-powered-by')
+  // Exactly one proxy hop (nginx). Not `true`, which would trust a spoofed
+  // X-Forwarded-For from anyone who could reach the port.
+  app.set('trust proxy', 1)
+  app.disable('x-powered-by')
 
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        // Vite emits hashed <style> tags; no third-party origin is ever allowed.
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        scriptSrc: ["'self'"],
-        imgSrc: ["'self'", 'data:'],
-        connectSrc: ["'self'"],
-        frameAncestors: ["'none'"],
-        objectSrc: ["'none'"],
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrc: ["'self'"],
+          imgSrc: ["'self'", 'data:'],
+          connectSrc: ["'self'"],
+          frameAncestors: ["'none'"],
+          objectSrc: ["'none'"],
+          formAction: ["'self'"],
+        },
       },
-    },
-    // helmet defaults to SAMEORIGIN. Nothing should ever frame this app, and
-    // CSP frame-ancestors above already says so for modern browsers — DENY
-    // closes the same gap for anything that only understands this header.
-    frameguard: { action: 'deny' },
-    // HSTS is set by nginx for the whole host; duplicating it here would be
-    // harmless but misleading about who owns the policy.
-    hsts: false,
-  }),
-)
+      frameguard: { action: 'deny' },
+      // HSTS belongs to nginx, which owns TLS for the whole host.
+      hsts: false,
+    }),
+  )
 
-app.use(express.json({ limit: '1mb' }))
+  app.use(correlation)
+  app.use(express.json({ limit: '1mb' }))
+  app.use(cookieParser())
+  app.use(attachSession)
 
-const api = express.Router()
+  const origins = [
+    'https://apps.unitedceres.edu.sg',
+    `http://127.0.0.1:${env.PORT}`,
+    `http://localhost:${env.PORT}`,
+    'http://localhost:5174',
+  ]
 
-api.get('/health', (_req, res) => {
-  const mem = process.memoryUsage()
-  res.json({
-    ok: true,
-    phase: 1,
-    uptimeSeconds: Math.round(process.uptime()),
-    // Surfaced deliberately: this box runs four other apps in 1.9 GiB, so the
-    // app's own footprint needs to be checkable without shelling into the server.
-    memory: {
-      rssMb: +(mem.rss / 1024 / 1024).toFixed(1),
-      heapUsedMb: +(mem.heapUsed / 1024 / 1024).toFixed(1),
-    },
+  // Public: health and auth. Everything else requires the authorised account.
+  const publicApi = express.Router()
+  publicApi.get('/health', (_req, res) => {
+    const mem = process.memoryUsage()
+    res.json({
+      ok: true,
+      uptimeSeconds: Math.round(process.uptime()),
+      capabilities: capabilities(),
+      memory: {
+        rssMb: +(mem.rss / 1024 / 1024).toFixed(1),
+        heapUsedMb: +(mem.heapUsed / 1024 / 1024).toFixed(1),
+      },
+    })
   })
-})
+  app.use(`${BASE_PATH}/api`, publicApi)
+  app.use(`${BASE_PATH}/api/auth`, csrfGuard(origins), authRouter)
 
-app.use(`${BASE_PATH}/api`, api)
+  const api = express.Router()
+  api.use(csrfGuard(origins))
+  api.use(requireAuth)
+  api.use(criteriaRouter)
+  api.use(sourcesRouter)
+  api.use(configRouter)
+  api.use(migrationRouter)
+  api.use(reportsRouter)
+  app.use(`${BASE_PATH}/api`, api)
 
-// index.html is served here for the base path itself; the splat below only has
-// to cover deeper paths. Disabling `index` and relying on the splat alone 404s
-// on /ppd_converter/ — the splat does not match the empty remainder.
-app.use(BASE_PATH, express.static(clientDir))
+  // index.html is served here for the base path itself; the splat below covers
+  // deeper paths only — it does not match an empty remainder.
+  app.use(BASE_PATH, express.static(clientDir))
+  app.get(`${BASE_PATH}/*splat`, (_req, res) => {
+    res.sendFile(path.join(clientDir, 'index.html'))
+  })
+  app.get('/', (_req, res) => res.redirect(`${BASE_PATH}/`))
 
-// SPA fallback: any non-API path under the base path returns index.html so
-// BrowserRouter can handle deep links (e.g. /ppd_converter/migration).
-app.get(`${BASE_PATH}/*splat`, (_req, res) => {
-  res.sendFile(path.join(clientDir, 'index.html'))
-})
+  app.use(errorHandler)
+  return app
+}
 
-app.get('/', (_req, res) => res.redirect(`${BASE_PATH}/`))
-
-app.listen(PORT, HOST, () => {
-  console.log(`ppd_converter listening on http://${HOST}:${PORT}${BASE_PATH}/`)
-})
+// Only listen when run directly, so tests can import createApp() without
+// binding a port.
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  applyPragmas()
+  createApp().listen(env.PORT, env.HOST, () => {
+    log.info('ppd_converter started', {
+      url: `http://${env.HOST}:${env.PORT}${BASE_PATH}/`,
+      capabilities: capabilities(),
+    })
+  })
+}

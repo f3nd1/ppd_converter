@@ -24,6 +24,9 @@ const DEPS = [
   ['better-sqlite3', () => import('better-sqlite3')],
   ['openai', () => import('openai')],
   ['google-auth-library', () => import('google-auth-library')],
+  // Prisma last and measured separately: it is by far the largest single cost,
+  // and a connected client costs more than the bare import.
+  ['@prisma/client (import)', () => import('../server/generated/prisma/client.ts')],
 ]
 
 const rows = []
@@ -52,3 +55,19 @@ console.log(
   `\nThis is import cost only. Real serving RSS is higher — measure the running` +
     `\nserver with:  curl -s http://127.0.0.1:4020/ppd_converter/api/health\n`,
 )
+
+// A connected Prisma client, which is what actually runs in production.
+const beforeConnect = process.memoryUsage().rss
+try {
+  const { PrismaBetterSqlite3 } = await import('@prisma/adapter-better-sqlite3')
+  const { PrismaClient } = await import('../server/generated/prisma/client.ts')
+  const client = new PrismaClient({
+    adapter: new PrismaBetterSqlite3({ url: process.env.DATABASE_URL ?? 'file:./data/ppd.db' }),
+  })
+  await client.$queryRawUnsafe('SELECT 1')
+  const after = process.memoryUsage().rss
+  console.log(`Prisma client connected + 1 query   +${mb(after - beforeConnect)} MB  (total ${mb(after)} MB)`)
+  await client.$disconnect()
+} catch (err) {
+  console.log(`Prisma connect measurement skipped: ${err.message.slice(0, 80)}`)
+}

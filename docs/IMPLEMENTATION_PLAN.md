@@ -118,6 +118,28 @@ Two facts do matter and are not softened by the correction: **swap has already b
 used)**, which means this box has been under memory pressure at least once; and headroom must be left for
 the four existing apps to grow, not consumed by a fifth.
 
+> ### ⚠️ Revision 3 — the estimates below were partly wrong. Measured reality:
+>
+> | | Estimated | **Measured** |
+> |---|---|---|
+> | Build peak RSS | 300–500 MB | **291 MB** ✅ |
+> | Full-app idle RSS | 70–110 MB | **~177 MB** ❌ |
+> | Under load (200 requests) | — | **181 MB, stable** |
+>
+> **The build figure held; the runtime figure did not.** The cause is Prisma:
+> **~80 MB** of the total (36 MB to import, ~43 MB more once connected). Every other
+> dependency combined is ~35 MB, and `better-sqlite3` alone is 1.4 MB.
+>
+> The architecture decision still holds — 181 MB is comparable to two of the four
+> existing apps, and Next.js would have added its own runtime on top of this same
+> Prisma cost. But the PM2 ceiling was set from the estimate: `max_memory_restart`
+> was raised from 250 MB (which would have restart-looped during a migration) to
+> **400 MB**, now a genuine runaway backstop at 45% headroom.
+>
+> **Option, not taken:** dropping Prisma for `better-sqlite3` directly would save
+> ~80 MB. Prisma was named in the approved stack, so this is flagged rather than
+> decided. Re-check any time with `npm run measure` and `/api/health`.
+
 ### Runtime footprint comparison — the question you asked
 
 Estimates, to be **measured** at Phase 1 rather than trusted:

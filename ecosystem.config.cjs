@@ -17,13 +17,19 @@ module.exports = {
       instances: 1,
       exec_mode: 'fork',
 
-      // The box has 1.9 GiB total with four other apps on it. Capping V8's heap
-      // makes it collect rather than grow into their space, and
-      // max_memory_restart means PM2 restarts THIS app if it ever misbehaves —
-      // before the kernel OOM killer gets to pick a victim by score and takes
-      // down someone else's app instead.
-      node_args: '--max-old-space-size=192',
-      max_memory_restart: '250M',
+      // The box has 1.9 GiB total with four other apps on it (~280 MB between
+      // them). max_memory_restart means PM2 restarts THIS app if it ever runs
+      // away — before the kernel OOM killer gets to pick a victim by score and
+      // takes down someone else's app instead.
+      //
+      // 400M is a runaway backstop, NOT the expected footprint. Measured idle
+      // RSS is ~177 MB, of which Prisma accounts for ~80 MB (36 MB to import,
+      // ~43 MB more once connected; everything else combined is ~35 MB). An
+      // earlier 250M ceiling was set from an estimate and would have
+      // restart-looped during a migration — re-check with `npm run measure` and
+      // the /api/health endpoint before lowering it again.
+      node_args: '--max-old-space-size=256',
+      max_memory_restart: '400M',
 
       env: {
         NODE_ENV: 'production',

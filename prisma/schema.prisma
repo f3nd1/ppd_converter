@@ -1,0 +1,486 @@
+// PPD Converter data model.
+//
+// SQLite has no native enum type, so every status/kind column is a String
+// validated by a Zod enum at the route boundary (server/lib/enums.ts holds the
+// single definition each one is checked against). Keeping the check in one place
+// beats a database enum we would have to migrate on every wording change.
+//
+// All DateTime values are stored UTC. Asia/Singapore is a display concern only —
+// nothing in this schema stores a local time.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../server/generated/prisma"
+}
+
+// Prisma 7: the connection URL lives in prisma.config.ts for the CLI, and is
+// passed to PrismaClient via a driver adapter at runtime (server/lib/db.ts).
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model AppUser {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  displayName String?
+  isAuthorised Boolean @default(false)
+  lastLoginAt DateTime?
+  createdAt   DateTime @default(now())
+
+  credentials OAuthCredential[]
+}
+
+model OAuthCredential {
+  id        String   @id @default(cuid())
+  appUserId String
+  appUser   AppUser  @relation(fields: [appUserId], references: [id], onDelete: Cascade)
+
+  // AES-256-GCM. The plaintext refresh token never touches disk or a log.
+  refreshTokenEnc String
+  iv              String
+  authTag         String
+
+  scopes    String
+  expiresAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([appUserId])
+}
+
+// ---------------------------------------------------------------------------
+// Criteria and source configuration
+// ---------------------------------------------------------------------------
+
+model Criterion {
+  id     String @id @default(cuid())
+  number Int    @unique
+  title  String
+  order  Int
+
+  subCriteria SubCriterion[]
+}
+
+model SubCriterion {
+  id          String    @id @default(cuid())
+  criterionId String
+  criterion   Criterion @relation(fields: [criterionId], references: [id], onDelete: Cascade)
+
+  // Free text, e.g. "1.1.1". Deliberately NOT derived from the criterion number:
+  // gd4_simulator's data shows sub-criterion codes are not always two-part, so
+  // truncating or generating a code would produce wrong values.
+  code      String
+  title     String
+  order     Int
+  isActive  Boolean   @default(true)
+  deactivatedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  sourceMapping SourceMapping?
+
+  @@unique([criterionId, code])
+  @@index([criterionId, order])
+}
+
+model SourceMapping {
+  id             String       @id @default(cuid())
+  subCriterionId String       @unique
+  subCriterion   SubCriterion @relation(fields: [subCriterionId], references: [id], onDelete: Cascade)
+
+  oldUrl          String?
+  oldResourceId   String?
+  oldResourceType String? // "folder" | "document"
+  newUrl          String?
+  newResourceId   String?
+  newResourceType String?
+
+  validationStatus String    @default("not_validated")
+  errorDetail      String?
+  lastValidatedAt  DateTime?
+  lastScannedAt    DateTime?
+  sourceDocCount   Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents SourceDocument[]
+}
+
+model SourceDocument {
+  id              String        @id @default(cuid())
+  sourceMappingId String
+  sourceMapping   SourceMapping @relation(fields: [sourceMappingId], references: [id], onDelete: Cascade)
+
+  googleFileId String
+  title        String
+  documentCode String?
+  mimeType     String
+  modifiedTime DateTime
+  webViewLink  String?
+
+  // Hash of the parsed content, used to prove the source has not changed
+  // between scan and migration. Null until the document has been parsed.
+  contentHash String?
+
+  // Set when a second file with the same title/id turns up in a scan.
+  isDuplicateOf String?
+
+  migrationStatus String @default("not_started")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  blocks            ContentBlock[]
+  jobs              MigrationJob[]
+  migratedDocuments MigratedDocument[]
+
+  @@unique([sourceMappingId, googleFileId])
+  @@index([migrationStatus])
+}
+
+// ---------------------------------------------------------------------------
+// Template, AI instructions, mapping — all versioned, only one active each
+// ---------------------------------------------------------------------------
+
+model TemplateVersion {
+  id           String   @id @default(cuid())
+  name         String
+  googleDocId  String
+  url          String
+  versionLabel String
+
+  validationResult String // JSON blob of the check results
+  configSnapshot   String // JSON: required sections/placeholders at activation time
+
+  isActive    Boolean   @default(false)
+  activatedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  jobs       MigrationJob[]
+  migrations MigratedDocument[]
+
+  @@index([isActive])
+}
+
+model AIInstructionVersion {
+  id           String   @id @default(cuid())
+  versionLabel String
+  body         String
+
+  isActive       Boolean   @default(false)
+  activatedAt    DateTime?
+  restoredFromId String?
+  createdAt      DateTime  @default(now())
+
+  jobs MigrationJob[]
+
+  @@index([isActive])
+}
+
+model MappingVersion {
+  id           String @id @default(cuid())
+  versionLabel String @unique
+
+  // Production migration is blocked unless approvalStatus == "approved"
+  // AND isActive. Both are required; neither alone is enough.
+  approvalStatus String    @default("draft")
+  approvedBy     String?
+  approvedAt     DateTime?
+
+  isActive  Boolean  @default(false)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rules MappingRule[]
+  jobs  MigrationJob[]
+
+  @@index([isActive, approvalStatus])
+}
+
+model MappingRule {
+  id               String         @id @default(cuid())
+  mappingVersionId String
+  mappingVersion   MappingVersion @relation(fields: [mappingVersionId], references: [id], onDelete: Cascade)
+
+  oldSectionName     String
+  newTargetSection   String
+  transformationRule String
+  priority           Int     @default(100)
+  notes              String?
+  isActive           Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  blockMappings ContentBlockMapping[]
+
+  @@index([mappingVersionId, priority])
+}
+
+// ---------------------------------------------------------------------------
+// Migration
+// ---------------------------------------------------------------------------
+
+model MigrationJob {
+  id               String         @id @default(cuid())
+  sourceDocumentId String
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+
+  stage   String @default("queued")
+  attempt Int    @default(1)
+
+  queuedAt   DateTime  @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+
+  errorRef      String?
+  errorMessage  String?
+  correlationId String
+
+  // Versions are frozen onto the job at queue time so a later activation
+  // cannot retroactively change what a completed migration was run against.
+  templateVersionId      String?
+  templateVersion        TemplateVersion? @relation(fields: [templateVersionId], references: [id])
+  aiInstructionVersionId String?
+  aiInstructionVersion   AIInstructionVersion? @relation(fields: [aiInstructionVersionId], references: [id])
+  mappingVersionId       String?
+  mappingVersion         MappingVersion? @relation(fields: [mappingVersionId], references: [id])
+
+  migratedDocument MigratedDocument?
+
+  @@index([stage])
+  @@index([sourceDocumentId])
+}
+
+model MigratedDocument {
+  id             String       @id @default(cuid())
+  migrationJobId String       @unique
+  migrationJob   MigrationJob @relation(fields: [migrationJobId], references: [id], onDelete: Cascade)
+
+  sourceDocumentId String
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+
+  targetGoogleDocId String?
+  targetUrl         String?
+  targetTitle       String
+  outputVersion     String  @default("2.1")
+  destinationFolderId String
+
+  // Recorded at migration time so validation can prove the source did not
+  // change underneath the run.
+  sourceModifiedTimeAtMigration DateTime
+
+  templateVersionId String?
+  templateVersion   TemplateVersion? @relation(fields: [templateVersionId], references: [id])
+
+  status    String   @default("awaiting_review")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  changes         ChangeRecord[]
+  validationRuns  ValidationRun[]
+  reviewDecisions ReviewDecision[]
+
+  // Two revised documents must never land in the same folder under the same
+  // title. Enforced here as well as by a live Drive check before the copy.
+  @@unique([destinationFolderId, targetTitle])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Internal document model
+// ---------------------------------------------------------------------------
+
+model ContentBlock {
+  id               String         @id @default(cuid())
+  sourceDocumentId String
+  sourceDocument   SourceDocument @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+
+  // Stable across re-scans while the text is unchanged. A changed hash is a
+  // signal that the source drifted, not a reason to silently renumber.
+  blockId String
+
+  type          String
+  text          String
+  textHash      String
+  level         Int?
+  styleName     String?
+  numbering     String? // JSON
+  links         String? // JSON array
+  tableData     String? // JSON
+  imageRef      String? // JSON
+  sourceLocation String? // JSON
+  parentBlockId String?
+  order         Int
+
+  createdAt DateTime @default(now())
+
+  mappings ContentBlockMapping[]
+
+  @@unique([sourceDocumentId, blockId])
+  @@index([sourceDocumentId, order])
+}
+
+model ContentBlockMapping {
+  id             String       @id @default(cuid())
+  contentBlockId String
+  contentBlock   ContentBlock @relation(fields: [contentBlockId], references: [id], onDelete: Cascade)
+
+  targetSection String?
+  mappingRuleId String?
+  mappingRule   MappingRule? @relation(fields: [mappingRuleId], references: [id])
+
+  // "mapped" | "unmapped" | "ambiguous". Every block gets a row, so
+  // "every source block is accounted for" is a set comparison, not a guess.
+  status     String
+  confidence Float?
+  note       String?
+
+  migratedDocumentId String?
+  createdAt          DateTime @default(now())
+
+  @@index([contentBlockId])
+  @@index([migratedDocumentId])
+}
+
+model ChangeRecord {
+  id                 String           @id @default(cuid())
+  migratedDocumentId String
+  migratedDocument   MigratedDocument @relation(fields: [migratedDocumentId], references: [id], onDelete: Cascade)
+
+  changeNumber Int
+  changeType   String
+
+  sourceSection String?
+  targetSection String?
+  sourceBlockId String?
+
+  // Both excerpts are SLICED from real stored content — never authored by the
+  // AI. A unit test asserts each is a substring of its real source or target.
+  originalExcerpt String?
+  revisedExcerpt  String?
+
+  reason           String?
+  confidence       Float?
+  validationResult String?
+  reviewStatus     String  @default("pending")
+
+  createdAt DateTime @default(now())
+
+  @@unique([migratedDocumentId, changeNumber])
+  @@index([migratedDocumentId])
+}
+
+// ---------------------------------------------------------------------------
+// Validation and review
+// ---------------------------------------------------------------------------
+
+model ValidationRun {
+  id                 String           @id @default(cuid())
+  migratedDocumentId String
+  migratedDocument   MigratedDocument @relation(fields: [migratedDocumentId], references: [id], onDelete: Cascade)
+
+  // "deterministic" | "ai" — two separate layers, two separate runs. The AI
+  // layer is never authoritative on its own.
+  layer String
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  summary    String?
+
+  // Provider metadata for the AI layer. Secret headers are never stored.
+  model             String?
+  providerRequestId String?
+  usageJson         String?
+
+  items ValidationItem[]
+
+  @@index([migratedDocumentId, layer])
+}
+
+model ValidationItem {
+  id              String        @id @default(cuid())
+  validationRunId String
+  validationRun   ValidationRun @relation(fields: [validationRunId], references: [id], onDelete: Cascade)
+
+  category        String
+  checkPerformed  String
+  result          String // "pass" | "warning" | "fail"
+  details         String?
+  severity        String @default("info")
+  sourceReference String?
+  targetReference String?
+
+  humanReviewRequired Boolean   @default(false)
+  resolutionStatus    String    @default("open")
+  resolutionNote      String?
+  resolvedAt          DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([validationRunId, result])
+}
+
+model ReviewDecision {
+  id                 String           @id @default(cuid())
+  migratedDocumentId String
+  migratedDocument   MigratedDocument @relation(fields: [migratedDocumentId], references: [id], onDelete: Cascade)
+
+  reviewerEmail String
+  decision      String // "approved" | "returned_for_correction"
+  comment       String?
+  decidedAt     DateTime @default(now())
+
+  // Frozen provenance — what this decision was actually made against.
+  aiInstructionVersionId String?
+  mappingVersionId       String?
+  templateVersionId      String?
+  sourceModifiedTime     DateTime?
+  targetGoogleDocId      String?
+  validationSummary      String?
+
+  @@index([migratedDocumentId])
+}
+
+// ---------------------------------------------------------------------------
+// Audit trail
+// ---------------------------------------------------------------------------
+
+// Append-only. UPDATE and DELETE are blocked by SQLite triggers added in the
+// migration — the application has no code path that edits or removes a row.
+model ActivityLog {
+  id            String   @id @default(cuid())
+  occurredAtUtc DateTime @default(now())
+
+  action     String
+  entityType String?
+  entityId   String?
+  result     String  @default("success")
+  summary    String?
+  errorRef   String?
+  correlationId String?
+
+  @@index([occurredAtUtc])
+  @@index([action])
+  @@index([entityType, entityId])
+}
+
+model ExportRecord {
+  id     String @id @default(cuid())
+  format String
+  scope  String
+
+  filters       String?
+  rowCount      Int      @default(0)
+  correlationId String?
+  exportedAt    DateTime @default(now())
+
+  @@index([exportedAt])
+}
