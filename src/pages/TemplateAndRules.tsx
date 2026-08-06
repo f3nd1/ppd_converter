@@ -43,7 +43,6 @@ export default function TemplateAndRules() {
   const [tab, setTab] = useState<Tab>('template')
   return (
     <>
-      <h1>Template and AI Rules</h1>
       <div className="tabs" role="tablist">
         {(
           [

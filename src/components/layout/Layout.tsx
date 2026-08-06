@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { NavLink, Outlet } from 'react-router'
+import { NavLink, Outlet, useLocation } from 'react-router'
 import type { Me } from '../../App.tsx'
 import { api } from '../../api.ts'
-import { NAV } from '../../nav.ts'
+import { navGroups, titleForPath } from '../../nav.ts'
 
 export default function Layout({ me }: { me: Me }) {
   const [signingOut, setSigningOut] = useState(false)
+  const location = useLocation()
 
   const signOut = async () => {
     setSigningOut(true)
@@ -20,37 +21,45 @@ export default function Layout({ me }: { me: Me }) {
 
   return (
     <div className="app">
-      <nav className="sidebar" aria-label="Primary">
-        <div className="brand">
-          <strong>PPD Converter</strong>
-          <span className="brand-sub">United Ceres College</span>
-        </div>
-        <ul>
-          {NAV.map((item) => (
-            <li key={item.path}>
-              <NavLink to={item.path} end={item.path === '/'} title={item.hint}>
-                {item.label}
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+      <aside className="sidebar">
+        <div className="brand">PPD Converter</div>
+        <div className="brand-sub">Policy &amp; Procedure Migration</div>
 
-        <div className="account">
-          <span className="account-email" title={me.email ?? ''}>
-            {me.email}
-          </span>
-          {/* Surfaced here because a migration fails confusingly late if OpenAI
-              is misconfigured — better to see it before starting one. */}
-          {!me.capabilities.openai ? (
-            <span className="account-warn">OpenAI is not configured</span>
-          ) : null}
-          <button type="button" onClick={signOut} disabled={signingOut}>
-            {signingOut ? 'Signing out…' : 'Sign out'}
-          </button>
+        <nav className="nav" aria-label="Primary">
+          {navGroups().map((group) => (
+            <div key={group.group}>
+              <div className="nav-section">{group.group}</div>
+              {group.items.map((item) => (
+                <NavLink key={item.path} to={item.path} end={item.path === '/'} title={item.hint}>
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
+          ))}
+        </nav>
+
+        {/* Surfaced here because a migration otherwise fails confusingly late
+            if OpenAI is misconfigured. */}
+        {!me.capabilities.openai ? (
+          <div className="side-warn">OpenAI is not configured</div>
+        ) : null}
+      </aside>
+
+      <main className="main">
+        <header className="topbar">
+          <h1>{titleForPath(location.pathname)}</h1>
+          <div className="user">
+            <span className="account-email" title={me.email ?? ''}>
+              {me.email}
+            </span>
+            <button type="button" onClick={signOut} disabled={signingOut}>
+              {signingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          </div>
+        </header>
+        <div className="page">
+          <Outlet />
         </div>
-      </nav>
-      <main className="content">
-        <Outlet />
       </main>
     </div>
   )

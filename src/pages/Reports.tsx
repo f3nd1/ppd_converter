@@ -40,7 +40,6 @@ export default function Reports() {
 
   return (
     <>
-      <h1>Reports and Activity</h1>
 
       <Card title="Export">
         <div className="button-row">

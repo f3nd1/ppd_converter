@@ -82,7 +82,6 @@ export default function Migration() {
 
   return (
     <>
-      <h1>Migration and Validation</h1>
 
       {blocked ? (
         <p className="blocked" role="status">

@@ -57,7 +57,6 @@ export default function SourceDocuments() {
 
   return (
     <>
-      <h1>Source Documents</h1>
       <p className="empty">
         Add a sub-criterion under each criterion, then set its old and new Google links.
       </p>
